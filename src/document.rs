@@ -11,6 +11,7 @@ use crate::{KdlEntity, KdlError, KdlErrorKind};
 
 use crate::parser::{document, newline};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KdlDocument(pub(crate) Vec<KdlEntity>);
 
 impl KdlDocument {
