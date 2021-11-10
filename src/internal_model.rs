@@ -23,28 +23,34 @@ pub(crate) enum KdlComment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KdlNode {
-    name: String,
-    entities: Vec<KdlEntity>,
-    children: Vec<KdlEntity>,
+    pub(crate) name: String,
+    pub(crate) entities: Vec<KdlNodeEntity>,
+    pub(crate) children: Option<Vec<KdlEntity>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KdlProperty {
-    quoted: bool,
-    name: String,
-    value: KdlValue,
+    pub(crate) quoted: bool,
+    pub(crate) name: String,
+    pub(crate) value: KdlValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KdlValue {
-    RawString(String),
-    String(String),
+    RawString(KdlString),
+    String(KdlString),
     Base2(String),
     Base8(String),
     Base10(String),
     Base16(String),
     Bool(bool),
     Null,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KdlString {
+    pub(crate) value: String,
+    pub(crate) original: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

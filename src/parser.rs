@@ -1,3 +1,4 @@
+use std::ops::RangeTo;
 use std::{collections::HashMap, iter::from_fn};
 
 use crate::nom_compat::{many0, many1, many_till};
@@ -7,11 +8,14 @@ use nom::character::complete::{anychar, char, none_of, one_of};
 use nom::combinator::{
     all_consuming, eof, iterator, map, map_opt, map_res, not, opt, recognize, value,
 };
+use nom::error::ParseError;
 use nom::multi::fold_many0;
 use nom::sequence::{delimited, preceded, terminated, tuple};
-use nom::IResult;
+use nom::{IResult, Offset, Parser, Slice};
 
-use crate::{KdlComment, KdlDocument, KdlEntity, KdlNode, KdlParseError, KdlType};
+use crate::{
+    KdlComment, KdlDocument, KdlEntity, KdlNode, KdlParseError, KdlString, KdlType, KdlValue,
+};
 
 pub(crate) fn document(input: &str) -> IResult<&str, KdlDocument, KdlParseError<&str>> {
     map(many0(entity), KdlDocument)(input)
@@ -77,7 +81,7 @@ fn comment(input: &str) -> IResult<&str, KdlComment, KdlParseError<&str>> {
         map(multi_line_comment, |x| {
             KdlComment::MultiLine(String::from(x))
         }),
-        map(slash_dash_node_comment, |x| {
+        map(slash_dash_comment, |x| {
             KdlComment::SlashDash(String::from(x))
         }),
     ))(input)
@@ -104,12 +108,104 @@ fn commented_block(input: &str) -> IResult<&str, &str, KdlParseError<&str>> {
     ))(input)
 }
 
-fn slash_dash_node_comment(input: &str) -> IResult<&str, &str, KdlParseError<&str>> {
-    recognize(preceded(tag("/-"), node))(input)
+fn slash_dash_comment(input: &str) -> IResult<&str, &str, KdlParseError<&str>> {
+    recognize(preceded(
+        tag("/-"),
+        // TODO: alt((node, etc, etc))
+        node,
+    ))(input)
 }
 
 fn node(input: &str) -> IResult<&str, (String, KdlNode), KdlParseError<&str>> {
     todo!()
+}
+
+fn boolean(input: &str) -> IResult<&str, KdlValue, KdlParseError<&str>> {
+    alt((
+        map(tag("true"), |_| KdlValue::Bool(true)),
+        map(tag("false"), |_| KdlValue::Bool(false)),
+    ))(input)
+}
+
+fn null(input: &str) -> IResult<&str, KdlValue, KdlParseError<&str>> {
+    map(tag("null"), |_| KdlValue::Null)(input)
+}
+
+/// `escaped-string := '"' character* '"'`
+fn string(input: &str) -> IResult<&str, KdlValue, KdlParseError<&str>> {
+    let (input, _) = tag("\"")(input)?;
+    let mut original = String::new();
+    let mut value = String::new();
+    original.push('"');
+    let (input, chars) = many0(character)(input)?;
+    for (raw, processed) in chars {
+        original.push_str(raw);
+        value.push(processed);
+    }
+    let (input, _) = tag("\"")(input)?;
+    original.push('"');
+    Ok((input, KdlValue::String(KdlString { original, value })))
+}
+
+/// `character := '\' escape | [^\"]`
+fn character(input: &str) -> IResult<&str, (&str, char), KdlParseError<&str>> {
+    with_raw(alt((preceded(char('\\'), escape), none_of("\\\""))))(input)
+}
+
+/// This is like `recognize`, but _also_ returns the actual value.
+fn with_raw<I: Clone + Offset + Slice<RangeTo<usize>>, O, E: ParseError<I>, F>(
+    mut parser: F,
+) -> impl FnMut(I) -> IResult<I, (I, O), E>
+where
+    F: Parser<I, O, E>,
+{
+    move |input: I| {
+        let i = input.clone();
+        match parser.parse(i) {
+            Ok((i, x)) => {
+                let index = input.offset(&i);
+                Ok((i, (input.slice(..index), x)))
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// creates a (map, inverse map) tuple
+macro_rules! bimap {
+    ($($x:expr => $y:expr),+) => {
+        (phf::phf_map!($($x => $y),+), phf::phf_map!($($y => $x),+))
+    }
+}
+
+/// a map and its inverse of escape-sequence<->char
+pub(crate) static ESCAPE_CHARS: (phf::Map<char, char>, phf::Map<char, char>) = bimap! {
+    '"' => '"',
+    '\\' => '\\',
+    '/' => '/',
+    'b' => '\u{08}',
+    'f' => '\u{0C}',
+    'n' => '\n',
+    'r' => '\r',
+    't' => '\t'
+};
+
+/// `escape := ["\\/bfnrt] | 'u{' hex-digit{1, 6} '}'`
+fn escape(input: &str) -> IResult<&str, char, KdlParseError<&str>> {
+    alt((
+        delimited(tag("u{"), unicode, char('}')),
+        map_opt(anychar, |c| ESCAPE_CHARS.0.get(&c).copied()),
+    ))(input)
+}
+
+fn unicode(input: &str) -> IResult<&str, char, KdlParseError<&str>> {
+    map_opt(
+        map_res(
+            take_while_m_n(1, 6, |c: char| c.is_ascii_hexdigit()),
+            |hex| u32::from_str_radix(hex, 16),
+        ),
+        std::char::from_u32,
+    )(input)
 }
 
 #[cfg(test)]
@@ -131,6 +227,44 @@ mod comment_tests {
         assert_eq!(
             comment("// Hello world"),
             Ok(("", KdlComment::SingleLine("// Hello world".into())))
+        );
+    }
+
+    #[test]
+    fn multi_line() {
+        assert_eq!(
+            comment("/* Hello world */"),
+            Ok(("", KdlComment::MultiLine("/* Hello world */".into())))
+        );
+    }
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+
+    #[test]
+    fn boolean_val() {
+        assert_eq!(boolean("true"), Ok(("", KdlValue::Bool(true))));
+        assert_eq!(boolean("false"), Ok(("", KdlValue::Bool(false))));
+    }
+
+    #[test]
+    fn null_val() {
+        assert_eq!(null("null"), Ok(("", KdlValue::Null)));
+    }
+
+    #[test]
+    fn string_val() {
+        assert_eq!(
+            string(r#""Hello \n\u{2020}world""#),
+            Ok((
+                "",
+                KdlValue::String(KdlString {
+                    original: r#""Hello \n\u{2020}world""#.into(),
+                    value: "Hello \n\u{2020}world".into()
+                })
+            ))
         );
     }
 }
